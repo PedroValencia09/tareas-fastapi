@@ -1,0 +1,315 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Gestión de Tareas - FastAPI JWT & Neon DB</title>
+    <style>
+        body { font-family: Arial, sans-serif; max-width: 650px; margin: 40px auto; padding: 20px; background: #f8f9fa; }
+        h1 { color: #2c3e50; text-align: center; }
+        .card { background: white; padding: 20px; border-radius: 8px; box-shadow: 0 2px 5px rgba(0,0,0,0.1); margin-bottom: 20px; }
+        form { display: flex; flex-direction: column; gap: 10px; }
+        input, textarea, button { padding: 10px; font-size: 14px; border-radius: 4px; border: 1px solid #ccc; }
+        button { background: #007bff; color: white; border: none; cursor: pointer; font-weight: bold; }
+        button:hover { background: #0056b3; }
+        .btn-secondary { background: #6c757d; }
+        .btn-secondary:hover { background: #5a6268; }
+        .btn-edit { background: #ffc107; color: #212529; padding: 6px 12px; }
+        .btn-edit:hover { background: #e0a800; }
+        .btn-update-save { background: #28a745; }
+        .btn-update-save:hover { background: #218838; }
+        .btn-delete { background: #dc3545; padding: 6px 12px; }
+        .btn-delete:hover { background: #bd2130; }
+        .tarea-item { display: flex; justify-content: space-between; align-items: center; padding: 12px; border-bottom: 1px solid #eee; gap: 10px; }
+        .tarea-item.completada span { text-decoration: line-through; color: #888; }
+        .acciones-tarea { display: flex; gap: 6px; flex-shrink: 0; }
+        .header-bar { display: flex; justify-content: space-between; align-items: center; margin-bottom: 15px; }
+        .hidden { display: none; }
+    </style>
+</head>
+<body>
+
+    <h1>Gestión de Tareas (JWT + Neon DB)</h1>
+
+    <!-- SECCIÓN DE AUTENTICACIÓN -->
+    <div id="authSection" class="card">
+        <h3>Iniciar Sesión o Registrarse</h3>
+        <form id="authForm">
+            <input type="text" id="username" placeholder="Usuario" required>
+            <input type="password" id="password" placeholder="Contraseña" required>
+            <div style="display: flex; gap: 10px;">
+                <button type="submit" style="flex: 1;">Iniciar Sesión</button>
+                <button type="button" class="btn-secondary" style="flex: 1;" onclick="registrarUsuario()">Registrarse</button>
+            </div>
+        </form>
+        <p id="authMsg" style="color: red; margin-top: 10px;"></p>
+    </div>
+
+    <!-- SECCIÓN DE LA APLICACIÓN (OCULTA SIN TOKEN) -->
+    <div id="appSection" class="hidden">
+        <div class="header-bar">
+            <span>Sesión activa: <strong id="usuarioActual"></strong></span>
+            <button class="btn-delete" onclick="cerrarSesion()">Cerrar Sesión</button>
+        </div>
+
+        <div class="card">
+            <h3 id="formTituloHeader">Agregar Nueva Tarea</h3>
+            <form id="tareaForm">
+                <input type="text" id="titulo" placeholder="Título de la tarea" required>
+                <textarea id="descripcion" placeholder="Descripción (opcional)"></textarea>
+                <div style="display: flex; gap: 10px;">
+                    <button type="submit" id="btnGuardarTarea" style="flex: 1;">Guardar en Neon DB</button>
+                    <button type="button" id="btnCancelarEdicion" class="btn-secondary hidden" onclick="cancelarEdicion()">Cancelar</button>
+                </div>
+            </form>
+        </div>
+
+        <div class="card">
+            <h3>Mis Tareas</h3>
+            <div id="listaTareas">Cargando tareas...</div>
+        </div>
+    </div>
+
+    <script>
+        const BASE_URL = "http://127.0.0.1:8001";
+        const API_URL = `${BASE_URL}/tareas/`;
+        let tareaEditandoId = null;
+
+        function getHeaders() {
+            const token = localStorage.getItem("token");
+            return {
+                "Content-Type": "application/json",
+                "Authorization": `Bearer ${token}`
+            };
+        }
+
+        function verificarSesion() {
+            const token = localStorage.getItem("token");
+            const user = localStorage.getItem("username");
+            if (token) {
+                document.getElementById("authSection").classList.add("hidden");
+                document.getElementById("appSection").classList.remove("hidden");
+                document.getElementById("usuarioActual").textContent = user;
+                obtenerTareas();
+            } else {
+                document.getElementById("authSection").classList.remove("hidden");
+                document.getElementById("appSection").classList.add("hidden");
+            }
+        }
+
+        // Login
+        document.getElementById("authForm").addEventListener("submit", async (e) => {
+            e.preventDefault();
+            const username = document.getElementById("username").value;
+            const password = document.getElementById("password").value;
+            const msg = document.getElementById("authMsg");
+            msg.textContent = "";
+
+            const formData = new URLSearchParams();
+            formData.append("username", username);
+            formData.append("password", password);
+
+            try {
+                const res = await fetch(`${BASE_URL}/login`, {
+                    method: "POST",
+                    headers: { "Content-Type": "application/x-www-form-urlencoded" },
+                    body: formData
+                });
+                const data = await res.json();
+
+                if (!res.ok) {
+                    msg.style.color = "red";
+                    msg.textContent = data.detail || "Error al iniciar sesión";
+                    return;
+                }
+
+                localStorage.setItem("token", data.access_token);
+                localStorage.setItem("username", username);
+                document.getElementById("authForm").reset();
+                verificarSesion();
+            } catch (error) {
+                msg.textContent = "Error de conexión con el servidor.";
+            }
+        });
+
+        // Registro
+        async function registrarUsuario() {
+            const username = document.getElementById("username").value;
+            const password = document.getElementById("password").value;
+            const msg = document.getElementById("authMsg");
+
+            if (!username || !password) {
+                msg.style.color = "red";
+                msg.textContent = "Ingresa usuario y contraseña para registrarte.";
+                return;
+            }
+
+            try {
+                const res = await fetch(`${BASE_URL}/registro`, {
+                    method: "POST",
+                    headers: { "Content-Type": "application/json" },
+                    body: JSON.stringify({ username, password })
+                });
+                const data = await res.json();
+
+                if (!res.ok) {
+                    msg.style.color = "red";
+                    msg.textContent = data.detail || "No se pudo registrar";
+                    return;
+                }
+
+                msg.style.color = "green";
+                msg.textContent = "Usuario creado con éxito. Ahora haz clic en Iniciar Sesión.";
+            } catch (error) {
+                msg.style.color = "red";
+                msg.textContent = "Error de conexión con el servidor.";
+            }
+        }
+
+        function cerrarSesion() {
+            localStorage.removeItem("token");
+            localStorage.removeItem("username");
+            cancelarEdicion();
+            verificarSesion();
+        }
+
+        async function obtenerTareas() {
+            try {
+                const res = await fetch(API_URL, { headers: getHeaders() });
+                if (res.status === 401) {
+                    cerrarSesion();
+                    return;
+                }
+                const tareas = await res.json();
+                const contenedor = document.getElementById("listaTareas");
+                contenedor.innerHTML = "";
+
+                if (tareas.length === 0) {
+                    contenedor.innerHTML = "<p>No tienes tareas registradas.</p>";
+                    return;
+                }
+
+                tareas.forEach(tarea => {
+                    const div = document.createElement("div");
+                    div.className = `tarea-item ${tarea.completada ? 'completada' : ''}`;
+
+                    const infoDiv = document.createElement("div");
+                    const checkbox = document.createElement("input");
+                    checkbox.type = "checkbox";
+                    checkbox.checked = tarea.completada;
+                    checkbox.onchange = () => cambiarEstado(tarea.id, !tarea.completada);
+
+                    const textoSpan = document.createElement("span");
+                    textoSpan.innerHTML = ` <strong>${tarea.titulo}</strong> ${tarea.descripcion ? '- ' + tarea.descripcion : ''}`;
+
+                    infoDiv.appendChild(checkbox);
+                    infoDiv.appendChild(textoSpan);
+
+                    const accionesDiv = document.createElement("div");
+                    accionesDiv.className = "acciones-tarea";
+
+                    const btnActualizar = document.createElement("button");
+                    btnActualizar.className = "btn-edit";
+                    btnActualizar.textContent = "Actualizar";
+                    btnActualizar.onclick = () => prepararEdicion(tarea);
+
+                    const btnEliminar = document.createElement("button");
+                    btnEliminar.className = "btn-delete";
+                    btnEliminar.textContent = "Eliminar";
+                    btnEliminar.onclick = () => borrarTarea(tarea.id);
+
+                    accionesDiv.appendChild(btnActualizar);
+                    accionesDiv.appendChild(btnEliminar);
+
+                    div.appendChild(infoDiv);
+                    div.appendChild(accionesDiv);
+                    contenedor.appendChild(div);
+                });
+            } catch (error) {
+                document.getElementById("listaTareas").innerHTML = "<p style='color:red;'>Error al conectar con la API.</p>";
+            }
+        }
+
+        // Cargar los datos de la tarea seleccionada en el formulario
+        function prepararEdicion(tarea) {
+            tareaEditandoId = tarea.id;
+            document.getElementById("titulo").value = tarea.titulo;
+            document.getElementById("descripcion").value = tarea.descripcion || "";
+
+            document.getElementById("formTituloHeader").textContent = "Editando Tarea";
+            const btnGuardar = document.getElementById("btnGuardarTarea");
+            btnGuardar.textContent = "Guardar Cambios en Neon DB";
+            btnGuardar.classList.add("btn-update-save");
+
+            document.getElementById("btnCancelarEdicion").classList.remove("hidden");
+            document.getElementById("titulo").focus();
+        }
+
+        // Volver el formulario a modo "Agregar Nueva Tarea"
+        function cancelarEdicion() {
+            tareaEditandoId = null;
+            document.getElementById("tareaForm").reset();
+            document.getElementById("formTituloHeader").textContent = "Agregar Nueva Tarea";
+
+            const btnGuardar = document.getElementById("btnGuardarTarea");
+            btnGuardar.textContent = "Guardar en Neon DB";
+            btnGuardar.classList.remove("btn-update-save");
+
+            document.getElementById("btnCancelarEdicion").classList.add("hidden");
+        }
+
+        // Maneja tanto crear (POST) como actualizar (PUT)
+        document.getElementById("tareaForm").addEventListener("submit", async (e) => {
+            e.preventDefault();
+            const titulo = document.getElementById("titulo").value.trim();
+            const descripcion = document.getElementById("descripcion").value.trim();
+
+            if (tareaEditandoId !== null) {
+                // MODO ACTUALIZAR (PUT)
+                const res = await fetch(`${API_URL}${tareaEditandoId}`, {
+                    method: "PUT",
+                    headers: getHeaders(),
+                    body: JSON.stringify({ titulo, descripcion })
+                });
+
+                if (res.status === 401) return cerrarSesion();
+                cancelarEdicion();
+                obtenerTareas();
+            } else {
+                // MODO CREAR (POST)
+                const res = await fetch(API_URL, {
+                    method: "POST",
+                    headers: getHeaders(),
+                    body: JSON.stringify({ titulo, descripcion, completada: false })
+                });
+
+                if (res.status === 401) return cerrarSesion();
+                document.getElementById("tareaForm").reset();
+                obtenerTareas();
+            }
+        });
+
+        async function cambiarEstado(id, completada) {
+            const res = await fetch(`${API_URL}${id}`, {
+                method: "PUT",
+                headers: getHeaders(),
+                body: JSON.stringify({ completada })
+            });
+            if (res.status === 401) return cerrarSesion();
+            obtenerTareas();
+        }
+
+        async function borrarTarea(id) {
+            if (tareaEditandoId === id) cancelarEdicion();
+            const res = await fetch(`${API_URL}${id}`, {
+                method: "DELETE",
+                headers: getHeaders()
+            });
+            if (res.status === 401) return cerrarSesion();
+            obtenerTareas();
+        }
+
+        verificarSesion();
+    </script>
+</body>
+</html>
